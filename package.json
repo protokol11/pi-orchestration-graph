@@ -1,0 +1,13 @@
+{
+  "name": "orchestration-graph",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/contract.test.mjs test/warm-load.test.mjs test/plan.test.mjs test/root.test.mjs test/pool.test.mjs test/dispatcher.test.mjs test/rewind.test.mjs test/candidates.test.mjs core/rank.test.mjs core/validity.test.mjs",
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}
