@@ -1,10 +1,25 @@
 # orchestration-graph
+npm package: [`@protokol11/pi-orchestration-graph`](https://www.npmjs.com/package/@protokol11/pi-orchestration-graph). Source of truth: [agent-governance](https://github.com/protokol11/agent-governance) monorepo.
 
 An explicit topology for pi orchestration: subagent pools, parallelism width, candidates, and a disk-backed dispatcher.
 
 Orchestration-graph is a pi extension that turns an orchestration plan (a markdown file of nodes with declared `writes`, `reads`, and `width`) into a schedule. The premise: an orchestrator under bounded rationality cannot hold the whole task network in its head while also improvising it — so the topology lives on disk, checked by lint, and the dispatcher follows it mechanically. Rules live outside the network, so a run can be audited, replayed, and rewound.
 
 In scope: plan linting, batch selection with declared width, candidate resume from session markers, worktree patch isolation at one seam, and warm-load preload budgeting. Out of scope: anything model-facing — no tools, no context injection, no turns enter the child sessions.
+
+## Quick start
+
+```sh
+npm install @protokol11/pi-orchestration-graph
+```
+
+Or from a clone of this repo:
+
+```sh
+cp -r pi-orchestration-graph ~/.pi/agent/extensions/pi-orchestration-graph
+```
+
+Details below.
 
 ## Install
 
