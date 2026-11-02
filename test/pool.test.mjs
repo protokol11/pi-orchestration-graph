@@ -306,3 +306,73 @@ test("settleWarnings: clean accepted node and non-accepted nodes produce no warn
 	// n2 was never accepted — even though it is undone, no warning
 	assert.deepEqual(settleWarnings(p, fs, []), []);
 });
+
+// ── spec-13: role fit as a pre-dispatch filter ──────────────────────────────
+
+const fitPlan = () =>
+	plan([
+		{ id: "exact", role: "coder", task: "do exact", requires: [], reads: [], writes: ["C:/proj/exact.md"], dependsOn: [], width: 4, needs: ["typescript"] },
+		{ id: "mismatch", role: "coder", task: "do mismatch", requires: [], reads: [], writes: ["C:/proj/mismatch.md"], dependsOn: [], width: 4, needs: ["screenshots", "art"] },
+		{ id: "silent", role: "reviewer", task: "do silent", requires: [], reads: [], writes: ["C:/proj/silent.md"], dependsOn: [], width: 4 },
+	]);
+const FIT_CATALOG = [
+	{ role: "coder", holds: ["typescript", "tests"] },
+	{ role: "reviewer", holds: ["review"] },
+];
+
+test("nextBatch: a fit-below node defers before dispatch; ok and unknown nodes pack (spec-13)", () => {
+	const result = nextBatch(fitPlan(), allAbsent, { catalog: FIT_CATALOG });
+	assert.equal(result.kind, "batch");
+	if (result.kind !== "batch") return;
+	assert.deepEqual(result.batch.ids, ["exact", "silent"], "below is filtered, unknown is dispatchable-but-unproven");
+	assert.deepEqual(result.batch.deferred, [{ id: "mismatch", why: "fit-below" }]);
+});
+
+test("nextBatch: the batch summary names the three fit buckets (spec-13)", () => {
+	const result = nextBatch(fitPlan(), allAbsent, { catalog: FIT_CATALOG });
+	assert.equal(result.kind, "batch");
+	if (result.kind !== "batch" || result.batch.fit === undefined) return assert.fail("fit missing");
+	const fit = result.batch.fit;
+	assert.deepEqual(fit.ok, ["exact"]);
+	assert.deepEqual(fit.below, ["mismatch"]);
+	assert.deepEqual(fit.unknown, ["silent"]);
+	assert.match(fit.summary, /fit: /);
+	assert.match(fit.summary, /ok 1 \(exact\)/);
+	assert.match(fit.summary, /below deferred 1 \(mismatch\)/);
+	assert.match(fit.summary, /unknown 1 \(silent\)/);
+});
+
+test("nextBatch: fit-below and a pre-existing refusal share the same deferred array (spec-13)", () => {
+	const p = plan([
+		{ id: "fitlow", role: "coder", task: "do fitlow", requires: [], reads: [], writes: ["C:/proj/fitlow.md"], dependsOn: [], width: 4, needs: ["screenshots", "art"] },
+		{ id: "first", role: "coder", task: "do first", requires: [], reads: [], writes: ["C:/proj/shared.md"], dependsOn: [], width: 4 },
+		{ id: "collide", role: "coder", task: "do collide", requires: [], reads: [], writes: ["C:/proj/shared.md"], dependsOn: [], width: 4 },
+	]);
+	const result = nextBatch(p, allAbsent, { catalog: FIT_CATALOG });
+	assert.equal(result.kind, "batch");
+	if (result.kind !== "batch") return;
+	assert.deepEqual(result.batch.ids, ["first"]);
+	assert.deepEqual(result.batch.deferred, [
+		{ id: "fitlow", why: "fit-below" },
+		{ id: "collide", why: "collision" },
+	]);
+});
+
+test("nextBatch: no catalog injected means no fit filter and no fit summary (spec-13)", () => {
+	const result = nextBatch(fitPlan(), allAbsent);
+	assert.equal(result.kind, "batch");
+	if (result.kind !== "batch") return;
+	assert.deepEqual(result.batch.ids, ["exact", "mismatch", "silent"], "absence of evidence is never a refusal");
+	assert.deepEqual(result.batch.deferred, []);
+	assert.equal(result.batch.fit, undefined);
+});
+
+test("nextBatch: fit filtering never reaches the write-verification path (spec-13 / PS-TV-04)", () => {
+	const p = fitPlan();
+	const fs = present(["C:/proj/exact.md"]);
+	// A node deferred as fit-below is simply not in the batch: it is neither
+	// accepted nor missing, and its writes never become the done predicate.
+	const verdict = verifyBatch({ ids: ["exact"] }, scanRoot("C:/proj"), scanRoot("C:/proj"), p);
+	assert.deepEqual(verdict.accepted.concat(verdict.missing, verdict.unchanged).includes("mismatch"), false);
+	assert.equal(fs.exists("C:/proj/exact.md"), true);
+});

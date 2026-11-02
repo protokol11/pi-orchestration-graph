@@ -6,12 +6,15 @@
 
 export type ValidityEntry = { id: string; type?: string };
 
+/** Read shape: a foreign branch dump may carry entries without an id. */
+export type ValidityProbe = Omit<ValidityEntry, "id"> & { id?: string };
+
 export type MarkerValidity =
 	| { state: "ok" }
-	| { state: "compacted"; by: string }
+	| { state: "compacted"; by?: string }
 	| { state: "missing" };
 
-export function markerValidity(branch: ValidityEntry[], markerId: string): MarkerValidity {
+export function markerValidity(branch: ValidityProbe[], markerId: string): MarkerValidity {
 	const index = branch.findIndex((entry) => entry.id === markerId);
 	if (index === -1) return { state: "missing" };
 	for (const entry of branch.slice(index + 1)) {

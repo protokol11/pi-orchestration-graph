@@ -250,3 +250,56 @@ test("lintPlan: frame-gated node with budget line and frame producer is warning-
 	assert.equal(result.ok, true);
 	assert.deepEqual(result.warnings, []);
 });
+
+// ── spec-13: needs, unknown-role, no inline holds ───────────────────────────
+
+const CATALOG = [{ role: "coder" }, { role: "reviewer" }];
+
+test("lintPlan: needs survives parsing as a string array (spec-13)", () => {
+	const result = lintPlan(`\`\`\`og-plan
+{"version":1,"writeRoot":"C:/proj","nodes":[{"id":"a","role":"coder","task":"do a","writes":["C:/proj/a.md"],"needs":["typescript","tests"],"dependsOn":[]}]}
+\`\`\``, { catalog: CATALOG });
+	assert.equal(result.ok, true);
+	if (result.ok) assert.deepEqual(result.plan.nodes[0].needs, ["typescript", "tests"]);
+});
+
+test("lintPlan: a non-string-array needs is a bad-shape error (spec-13)", () => {
+	const result = lintPlan(`\`\`\`og-plan
+{"version":1,"writeRoot":"C:/proj","nodes":[{"id":"a","role":"coder","task":"do a","writes":["C:/proj/a.md"],"needs":"typescript"}]}
+\`\`\``);
+	assert.equal(result.ok, false);
+	if (!result.ok) assert.ok(result.errors.some((e) => e.code === "bad-shape" && e.node === "a" && e.detail === "needs"));
+});
+
+test("lintPlan: unknown-role fires naming the node id when a catalog is injected (spec-13)", () => {
+	const result = lintPlan(`\`\`\`og-plan
+{"version":1,"writeRoot":"C:/proj","nodes":[{"id":"a","role":"ghost","task":"do a","writes":["C:/proj/a.md"],"needs":["typescript"]}]}
+\`\`\``, { catalog: CATALOG });
+	assert.equal(result.ok, false);
+	if (!result.ok) assert.ok(result.errors.some((e) => e.code === "unknown-role" && e.node === "a" && e.detail === "ghost"));
+});
+
+test("lintPlan: known roles pass with no unknown-role and no notes (spec-13)", () => {
+	const result = lintPlan(`\`\`\`og-plan
+{"version":1,"writeRoot":"C:/proj","nodes":[{"id":"a","role":"coder","task":"do a","writes":["C:/proj/a.md"],"dependsOn":[]}]}
+\`\`\``, { catalog: CATALOG });
+	assert.equal(result.ok, true);
+	assert.ok(!result.warnings.some((w) => w.code === "unknown-role"));
+	assert.equal(result.notes, undefined);
+});
+
+test("lintPlan: unknown-role is skipped, not failed, when no catalog is injected (spec-13)", () => {
+	const result = lintPlan(`\`\`\`og-plan
+{"version":1,"writeRoot":"C:/proj","nodes":[{"id":"a","role":"ghost","task":"do a","writes":["C:/proj/a.md"],"dependsOn":[]}]}
+\`\`\``);
+	assert.equal(result.ok, true, "an absent catalog never fails a plan");
+	assert.deepEqual(result.notes, ["role catalog not injected — unknown-role skipped"]);
+});
+
+test("lintPlan: an inline holds key is refused — plans never carry capability lists (spec-13)", () => {
+	const result = lintPlan(`\`\`\`og-plan
+{"version":1,"writeRoot":"C:/proj","nodes":[{"id":"a","role":"coder","task":"do a","writes":["C:/proj/a.md"],"holds":["typescript"],"dependsOn":[]}]}
+\`\`\``, { catalog: CATALOG });
+	assert.equal(result.ok, false);
+	if (!result.ok) assert.ok(result.errors.some((e) => e.code === "inline-holds" && e.node === "a"));
+});

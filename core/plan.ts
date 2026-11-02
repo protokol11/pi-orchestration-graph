@@ -9,6 +9,7 @@
 // first write; nothing creates it by hand.
 import { isInsideRoot, normalizePath, resolvePlanPath, uniquePaths } from "./contract.ts";
 import { findRepoRoot, isolationLint } from "./isolation.ts";
+import type { CatalogEntry } from "./rfit.ts";
 
 export const PLAN_BLOCK_FENCE = "og-plan";
 export const PLAN_VERSION = 1;
@@ -21,6 +22,11 @@ export type PlanNode = {
 	requires: string[];
 	/** Task material: listed in the task text, never truncated (spec-7). */
 	reads: string[];
+	/**
+	 * Capability tags the task requires (spec-13). Not `requires`: that one is
+	 * preload *file paths* (spec-7). Resolved against the catalog by `rfit`.
+	 */
+	needs?: string[];
 	/** Mandatory: the done predicate, the independence set, the declared outputs. */
 	writes: string[];
 	dependsOn: string[];
@@ -49,13 +55,19 @@ export type LintOptions = {
 	 * every settled plan. New plans should be authored and linted strict.
 	 */
 	strict?: boolean;
+	/**
+	 * spec-13 role catalog — the roles a child may be dispatched as. Absent means
+	 * `unknown-role` is skipped (reported as a note), never fail-closed: the
+	 * catalog producer (spec-A) lands independently of the plan corpus.
+	 */
+	catalog?: CatalogEntry[];
 };
 
 export type LintError = { code: string; node?: string; detail?: string };
 
 export type LintResult =
-	| { ok: true; plan: Plan; warnings: LintError[] }
-	| { ok: false; errors: LintError[]; warnings: LintError[] };
+	| { ok: true; plan: Plan; warnings: LintError[]; notes?: string[] }
+	| { ok: false; errors: LintError[]; warnings: LintError[]; notes?: string[] };
 
 // Hard-rule heuristics (spec-11). Matching is textual by design: the plan is the
 // authority and the lint must stay deterministic and cheap.
@@ -122,7 +134,7 @@ function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function lintNode(raw: unknown, index: number, errors: LintError[], ids: Set<string>): void {
+function lintNode(raw: unknown, index: number, errors: LintError[], ids: Set<string>, catalog: Set<string> | undefined): void {
 	const where = `node[${index}]`;
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		errors.push({ code: "bad-shape", node: where });
@@ -140,12 +152,21 @@ function lintNode(raw: unknown, index: number, errors: LintError[], ids: Set<str
 
 	if (typeof node.role !== "string" || node.role === "") {
 		errors.push({ code: "empty-role", node: id });
+	} else if (catalog !== undefined && !catalog.has(node.role)) {
+		// spec-13: a role nobody can be dispatched as is a plan bug, not a warning.
+		errors.push({ code: "unknown-role", node: id, detail: node.role });
+	}
+
+	// Plans never carry capability lists (K1 decision 2). `holds` lives in the
+	// catalog; an inline copy would be a second, unowned source of truth.
+	if (node.holds !== undefined) {
+		errors.push({ code: "inline-holds", node: id, detail: "holds" });
 	}
 	if (typeof node.task !== "string" || node.task === "") {
 		errors.push({ code: "bad-shape", node: id, detail: "task" });
 	}
 
-	for (const field of ["requires", "reads", "writes", "dependsOn"] as const) {
+	for (const field of ["requires", "reads", "writes", "dependsOn", "needs"] as const) {
 		if (node[field] !== undefined && !isStringArray(node[field])) {
 			errors.push({ code: "bad-shape", node: id, detail: field });
 		}
@@ -202,8 +223,17 @@ export function lintPlan(text: string, options: LintOptions = {}): LintResult {
 		return { ok: false, errors: [{ code: "bad-shape", detail: `version: ${String(root.version)}` }], warnings };
 	}
 
+	// spec-13: the catalog is injected, never read from disk here. Absent → the
+	// rule is skipped and said so — a missing producer is not a plan failure.
+	const notes: string[] = [];
+	const catalog =
+		options.catalog === undefined
+			? undefined
+			: new Set(options.catalog.filter((entry) => entry && typeof entry.role === "string").map((entry) => entry.role));
+	if (catalog === undefined) notes.push("role catalog not injected — unknown-role skipped");
+
 	const ids = new Set<string>();
-	root.nodes.forEach((node, index) => lintNode(node, index, errors, ids));
+	root.nodes.forEach((node, index) => lintNode(node, index, errors, ids, catalog));
 
 	// spec-11 hard rules: write ⊆ task-text (strict: error, default: warning);
 	// budget line and render-gate producibility for frame-gated nodes (warnings —
@@ -258,7 +288,7 @@ export function lintPlan(text: string, options: LintOptions = {}): LintResult {
 		errors.push({ code: "cycle", node: cycleNode?.id });
 	}
 
-	if (errors.length > 0) return { ok: false, errors, warnings };
+	if (errors.length > 0) return { ok: false, errors, warnings, ...(notes.length > 0 ? { notes } : {}) };
 
 	const plan: Plan = {
 		version: PLAN_VERSION,
@@ -269,13 +299,14 @@ export function lintPlan(text: string, options: LintOptions = {}): LintResult {
 			task: node.task as string,
 			requires: uniquePaths((node.requires as string[] | undefined) ?? []),
 			reads: uniquePaths((node.reads as string[] | undefined) ?? []),
+			...(node.needs !== undefined ? { needs: [...new Set(node.needs as string[])] } : {}),
 			writes: uniquePaths((node.writes as string[] | undefined) ?? []),
 			dependsOn: [...((node.dependsOn as string[] | undefined) ?? [])],
 			width: (node.width as number | undefined) ?? 1,
 			...(node.isolation !== undefined ? { isolation: node.isolation as "none" | "worktree" } : {}),
 		})),
 	};
-	return { ok: true, plan, warnings };
+	return { ok: true, plan, warnings, ...(notes.length > 0 ? { notes } : {}) };
 }
 
 function depsById(nodes: Array<{ id: string; dependsOn?: string[] }>): Map<string, string[]> {

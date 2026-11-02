@@ -25,6 +25,7 @@ import {
 import { checkRepoClean, findRepoRoot } from "./isolation.ts";
 import { dispatchable, type Plan, type PlanNode } from "./plan.ts";
 import { rank, type Candidate } from "./rank.ts";
+import { fitBatch, type BatchFit, type CatalogEntry } from "./rfit.ts";
 import { diffScan, scanRoot, type Change, type RootScan } from "./root.ts";
 
 export type PathSnapshot = {
@@ -34,7 +35,7 @@ export type PathSnapshot = {
 	size: number;
 };
 
-export type RefusalWhy = "width" | "collision" | "session-taken" | "repo-write-conflict";
+export type RefusalWhy = "width" | "collision" | "session-taken" | "repo-write-conflict" | "fit-below";
 export type Refusal = { id: string; why: RefusalWhy };
 
 export type Batch = {
@@ -45,6 +46,11 @@ export type Batch = {
 	/** Declared writes of `ids`, projected from the pre-batch `RootScan`. */
 	snapshot: PathSnapshot[];
 	rootScan: RootScan;
+	/**
+	 * spec-13 fit buckets for this step's candidates. Absent when no catalog was
+	 * injected — no evidence, no verdict, never a silent pass.
+	 */
+	fit?: BatchFit;
 };
 
 export type NextBatch =
@@ -81,6 +87,11 @@ export type PoolOptions = {
 	scan?: RootScan;
 	/** Injected preflight for isolated batches (spec-10); default runs real `git status`. */
 	checkRepo?: (repo: string) => { clean: boolean; dirty: string[] };
+	/**
+	 * spec-13 role catalog (`holds` per role). Absent → fit filtering is skipped
+	 * entirely: no catalog means no evidence, so absence is never a refusal.
+	 */
+	catalog?: CatalogEntry[];
 };
 
 function uniqueNormalized(paths: string[]): string[] {
@@ -157,7 +168,12 @@ export function nextBatch(plan: Plan, fs: FsProbe, options: PoolOptions = {}): N
 	};
 
 	const members: PlanNode[] = [];
-	const deferred: Refusal[] = [];
+	// spec-13: role-fit is a hard filter, but only against an injected catalog.
+	// A node that cannot do the task is deferred before any packing decision, so
+	// it can take neither a slot nor a warm session.
+	const fit = options.catalog === undefined ? undefined : fitBatch(candidates, options.catalog);
+	const fitBelow = new Set(fit?.below ?? []);
+	const deferred: Refusal[] = [...fitBelow].map((id) => ({ id, why: "fit-below" as const }));
 	const usedSessions = new Set<string>();
 	let cap = Number.POSITIVE_INFINITY;
 
@@ -169,6 +185,7 @@ export function nextBatch(plan: Plan, fs: FsProbe, options: PoolOptions = {}): N
 	};
 
 	for (const node of candidates) {
+		if (fitBelow.has(node.id)) continue;
 		if (members.length === 0) {
 			add(node);
 			continue;
@@ -224,7 +241,7 @@ export function nextBatch(plan: Plan, fs: FsProbe, options: PoolOptions = {}): N
 				return {
 					kind: "batch",
 					done: state.done,
-					batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan },
+					batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan, ...(fit !== undefined ? { fit } : {}) },
 					refused: { reason: "repo-dirty", dirty: status.dirty },
 				};
 			}
@@ -234,7 +251,7 @@ export function nextBatch(plan: Plan, fs: FsProbe, options: PoolOptions = {}): N
 	return {
 		kind: "batch",
 		done: state.done,
-		batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan },
+		batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan, ...(fit !== undefined ? { fit } : {}) },
 	};
 }
 

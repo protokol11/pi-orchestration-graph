@@ -9,6 +9,9 @@ Candidates are the dispatchable nodes in declaration order.
 
 ```
 batch = []; cap = Infinity; usedSessions = {}
+if a role catalog is injected:
+  fit = fitBatch(candidates, catalog)      # spec-13
+  candidates fit "below"                  -> defer "fit-below" (before any packing)
 for node of candidates:
   first node           -> admit
   min(cap, width) < n+1 -> defer "width"
@@ -21,6 +24,28 @@ for node of candidates:
 - One warm session serves one child per batch; the loser waits and re-ranks next step.
 - A node that is not dispatchable is not a candidate and is not listed as deferred.
 - Same plan + same filesystem → deep-equal batch.
+
+## Role fit (spec-13)
+
+When the caller injects a role catalog (`{ catalog: CatalogEntry[] }`), packing
+is preceded by `fitBatch`. A node whose role cannot do the task
+(`score = coverage × precision < MIN_FIT`) is deferred with reason `fit-below`
+**before** it can take a slot or a warm session, and the batch carries the three
+buckets:
+
+```
+fit: ok 2 (a, b) | below deferred 1 (c) | unknown 1 (d)
+```
+
+- `ok` — proven fit, dispatched.
+- `below` — deferred as `fit-below`; nothing about the node's writes changes.
+- `unknown` — no `needs`, no `holds`, or role absent from the catalog:
+  **dispatchable, unproven, and named**. Never coerced into `ok`.
+- **No catalog injected → no fit filtering at all** and no summary line. Absence
+  of evidence is not a refusal (the catalog producer lands independently).
+
+Fit is a scheduling filter, not verification: `needs` never appears in
+`deriveDone`, `verifyBatch`, or the settle path (`core/rfit.md`).
 
 ## Isolation is checked, not created
 
@@ -62,5 +87,5 @@ og: <id> verdict accepted but NOT done — missing: [...]; stale: [...]; blocked
 
 The P2-9 incident: an over-declared write (`player.test.ts` never created) made the node
 accepted-by-verdict but not-done-by-derivation, and the gap surfaced only on a later session
-resume as a surprise re-dispatch. The warning is emitted through `ui.notify` at level `warn`
+resume as a surprise re-dispatch. The warning is emitted through `ui.notify` at level `warning`
 and logged in the run log; it never blocks settle or changes the verdict.

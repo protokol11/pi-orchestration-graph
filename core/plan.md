@@ -26,6 +26,11 @@ first plan write or marker append makes them.
    - `reads` — task material. Listed whole in the dispatch text, never truncated.
    A large source document belongs in `reads`; a working file the child must hold
    at turn start belongs in `requires`.
+   A third vocabulary exists and is not material: `needs` — **capability tags**
+   the task requires (`["typescript","tests"]`), fitted against the role
+   catalog by `rfit` (spec-13). Never put file paths in `needs`, and never put
+   `holds` in a plan: the catalog owns it, and schema lint refuses it
+   (`inline-holds`).
 4. `writes` is mandatory and non-empty. It is the done predicate, the
    independence set, and the declared output list. A node with no output cannot
    be scheduled.
@@ -89,3 +94,19 @@ Beyond structure, lint checks three text rules:
 
 Warnings render via `og: warnings:` and never fail the lint; they are the
 corpus-wide debt list and promote to errors once plans are revised.
+
+## Role catalog (spec-13)
+
+`lintPlan(text, { catalog })` resolves every node's `role` against the injected
+catalog (role ids only — the capabilities stay in `rfit`'s half of the entry).
+
+- `unknown-role` (error) — the node's role is not in the catalog, reported with
+  the node id and the role. A role nobody can be dispatched as is a plan bug.
+- `inline-holds` (error) — a node carries a `holds` key. Plans declare `needs`;
+  capabilities live in the catalog (`core/rfit.md`).
+- **Absent catalog → `unknown-role` is skipped**, and `LintResult.notes` says
+  `role catalog not injected — unknown-role skipped`. Never fail-closed: the
+  catalog producer (spec-A) lands independently of the plan corpus.
+
+`needs` is validated as a string array like every other list field; it is never
+path-normalized (tags are not paths) and never fed to `fitPaths`.

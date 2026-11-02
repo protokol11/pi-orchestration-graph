@@ -193,9 +193,13 @@ export default function orchestrationGraph(pi: ExtensionAPI): void {
 
 			const failures: string[] = [];
 			const allWarnings: string[] = [];
+			const allNotes: string[] = [];
 			let passed = 0;
 			for (const file of files) {
 				const result = lintPlan(file.text, { cwd: ctx.cwd, strict });
+				for (const note of result.notes ?? []) {
+					if (!allNotes.includes(note)) allNotes.push(note);
+				}
 				for (const w of result.warnings) {
 					allWarnings.push(`${file.name}: ${w.code}${w.node ? `(${w.node})` : ""}${w.detail ? ` ${w.detail}` : ""}`);
 				}
@@ -208,7 +212,11 @@ export default function orchestrationGraph(pi: ExtensionAPI): void {
 				}
 			}
 			if (allWarnings.length > 0) {
-				ctx.ui.notify(`og: warnings:\n${allWarnings.join("\n")}`, "warn");
+				ctx.ui.notify(`og: warnings:\n${allWarnings.join("\n")}`, "warning");
+			}
+			// spec-13: a skipped rule is stated, never silent — and never a failure.
+			if (allNotes.length > 0) {
+				ctx.ui.notify(`og: notes:\n${allNotes.join("\n")}`, "info");
 			}
 			if (failures.length === 0) {
 				ctx.ui.notify(`og: ${passed}/${files.length} plans ok`, "info");
@@ -307,7 +315,7 @@ export default function orchestrationGraph(pi: ExtensionAPI): void {
 					].filter(Boolean).join("; ");
 					ctx.ui.notify(
 						`og: ${warning.id} verdict accepted but NOT done — ${why}. Fix the plan's writes, never touch untouched files.`,
-						"warn"
+						"warning"
 					);
 				}
 
@@ -445,6 +453,8 @@ export default function orchestrationGraph(pi: ExtensionAPI): void {
 				[
 					`og: batch ${batch.ids.join(", ")} (width ${batch.widthCap}${deferred})`,
 					`root scan ${scan.count}f / ${scan.bytes}B${scan.truncated ? " TRUNCATED → strayCheck skipped" : ""}`,
+					// spec-13: the fit buckets are the audit trail for this dispatch decision.
+					...(batch.fit !== undefined ? [batch.fit.summary] : []),
 					renderRunsAll(plan, batch),
 				].join("\n"),
 				"info"
