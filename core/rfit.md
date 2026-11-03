@@ -79,6 +79,108 @@ Evidence rows after the change:
 The last row is the trade the owner accepted. Partial coverage passes the gate
 and the shortfall stays visible in `missing`.
 
+## The judgment band (spec-14)
+
+`unknown` means the declarations are missing. A borderline `ok` means the tags
+disagree. Both are worth one cheap typed question, not a blind spawn and not a
+permanent refusal.
+
+### Trigger
+
+`bandOf(fit)` is true in two cases:
+
+| fit | coverage | in band |
+|---|---|---|
+| `unknown` | any | yes |
+| `ok` | within ±`BAND_WIDTH` of `MIN_COVERAGE` | yes |
+| `ok` | further than 0.15 from the gate | no |
+| `below` | any | no |
+
+`below` by a mile is a refusal, not a question. The band is surfaced on the
+batch (`Batch.fitBand`), and the node is dispatched as usual. The band never
+turns into a refusal in v1.
+
+### Candidates
+
+The candidate list is the node's role family. The family is the prefix before
+the first `:` or `-`, and a bare name is its own family (`familyOf`). This is
+the spec-D naming rule: specialized agents take a prefix (`coder-typescript`),
+so no new lookup rule is needed. Both directions work — a generic node sees its
+specialists, a specialist sees the generic sibling. The purpose is choosing the
+best fit inside the family, never scarcity.
+
+### Question shape
+
+`buildRfitQuestions(nodes, entries)` is pure. One `noul` question per (band
+node, family candidate):
+
+```json
+{
+  "rfit:n1:coder-typescript": {
+    "type": "noul",
+    "cp_key": "rfit:n1:coder-typescript",
+    "node": "n1",
+    "agent": "coder-typescript",
+    "instructions": "Does agent coder-typescript (holds: [typescript, rust]) cover subtask: add the typed loader?"
+  }
+}
+```
+
+- The map key is the `cp_key`. Verdicts align by data, never by parsing an id
+  (ADR-0039 precedent).
+- `instructions` is the field the shipped judgment lint requires. `cp_key`,
+  `node` and `agent` are extra fields the lint tolerates, and they are what the
+  mapping reads. The batch is JSON-serializable as is (RTL-03).
+- The task text is whitespace-collapsed and sliced to 160 characters, marked
+  with `…`. Long tasks add no signal to a yes/no question.
+- A non-band node asks nothing. A band node whose role has no family in the
+  catalog asks nothing either: `pool` still lists its row with
+  `candidates: []`, so the gap stays visible.
+
+No local linter is written. The judgment extension ships the gate
+(`extensions/judgment/core/lint.ts`, pure, no pi import), but that module lives
+outside the published `@protokol11/pi-orchestration-graph` package. A relative
+import would break the published tree, so this repo builds a lint-shaped batch
+and the judge tool lints it before the model call.
+
+### Verdict mapping
+
+`mapVerdicts(questions, verdicts)` is deterministic and conservative:
+
+| verdict | confidence | move |
+|---|---|---|
+| `yes` | ≥ `VERDICT_CONFIDENCE` (0.8) | `ok` |
+| `no` | ≥ 0.8 | `below` |
+| anything else | any | stays `unknown`, listed in `unresolved` |
+| absent | — | stays `unknown`, listed |
+
+Nothing answered is ever guessed into a pass. `unresolved` names question keys,
+so a reader can rerun one pair.
+
+### Conductor flow
+
+The model call happens outside this process: the conductor owns the judge tool.
+
+1. Run `/og-band <plan.md> --catalog <catalog.json>`.
+2. Copy the printed JSON into the judge tool.
+3. Rerun with `--verdicts <json|file>`.
+4. Read the bucket moves. The run log gains a `fit-judgment` record with the
+   batch id, the question keys, the verdicts, the moves and the unresolved list.
+
+v1 stops there: no re-pack, no auto-retry. The next `/og-dispatch` derives fit
+again from the catalog. A failed or refused batch leaves nodes `unknown` and
+listed.
+
+### Constants
+
+| constant | value | role |
+|---|---|---|
+| `BAND_WIDTH` | 0.15 | band around `MIN_COVERAGE` |
+| `VERDICT_CONFIDENCE` | 0.8 | confidence a verdict needs to move a bucket |
+
+Both are owner-confirmed (probe NOTES, 2026-11-02) and provisional: the mapping
+is re-checked from calibration data, not intuition.
+
 ## `needs` vs `requires` (CP-22)
 
 - `requires` — preload **file paths** for the load turn, truncated by `fitPaths`
@@ -106,11 +208,14 @@ noted.
 
 ## Exports (PS-02)
 
-Two functions, nothing else:
-
 ```
-fitNode(node, entry)        -> FitResult { fit, coverage, precision, score, missing }
-fitBatch(nodes, entries)    -> { ok, below, unknown, results, summary }
+fitNode(node, entry)            -> FitResult { fit, coverage, precision, score, missing }
+fitBatch(nodes, entries)        -> { ok, below, unknown, results, summary }
+familyOf(role)                  -> string
+familyCandidates(role, entries) -> string[]
+bandOf(fitResult)               -> boolean
+buildRfitQuestions(nodes, entries) -> Record<cp_key, RfitQuestion>
+mapVerdicts(questions, verdicts)   -> { moves, unresolved }
 ```
 
 ## Diagnostics
@@ -127,6 +232,8 @@ fitBatch(nodes, entries)    -> { ok, below, unknown, results, summary }
 1. The float boundary uses the same `coverage >= MIN_COVERAGE` double expression
    as `rank.ts`. Exact-half rationals (`2/4`) land on 0.5 exactly. Revisit only
    if a consumer needs exactness.
+2. `bandOf` adds `BAND_EPSILON` (1e-9) so a coverage exactly on the edge (0.65)
+   stays inside. `0.65 - 0.5` lands just above `0.15` in float arithmetic.
 2. `fitBatch` skips nodes without a string id. Lint enforces `id`, so this is
    unreachable after lint. It stays as a pure-function guard.
 3. In the unknown branch `missing` is deliberately `[]`. Nothing was claimed, so
@@ -138,5 +245,7 @@ fitBatch(nodes, entries)    -> { ok, below, unknown, results, summary }
 
 ## Out of scope
 
-The judgment band for `unknown`/borderline fit (spec-14), the tag registry,
-auto-extraction of `needs` from task text, and catalog frontmatter (spec-A).
+Learning the band from calibration (rule-lifecycle territory), score/choice
+question types, multi-question-per-pair ensembles, cross-session band caching
+(spec-14), the tag registry, auto-extraction of `needs` from task text, and
+catalog frontmatter (spec-A).

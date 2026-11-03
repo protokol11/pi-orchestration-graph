@@ -25,7 +25,7 @@ import {
 import { checkRepoClean, findRepoRoot } from "./isolation.ts";
 import { dispatchable, type Plan, type PlanNode } from "./plan.ts";
 import { rank, type Candidate } from "./rank.ts";
-import { fitBatch, type BatchFit, type CatalogEntry } from "./rfit.ts";
+import { bandOf, familyCandidates, fitBatch, type BatchFit, type CatalogEntry } from "./rfit.ts";
 import { diffScan, scanRoot, type Change, type RootScan } from "./root.ts";
 
 export type PathSnapshot = {
@@ -35,8 +35,16 @@ export type PathSnapshot = {
 	size: number;
 };
 
-export type RefusalWhy = "width" | "collision" | "session-taken" | "repo-write-conflict" | "fit-below";
+export type RefusalWhy = "width" | "collision" | "session-taken" | "repo-write-conflict" | "fit-below" | "fit-band";
 export type Refusal = { id: string; why: RefusalWhy };
+
+/**
+ * A deferred node whose fit sits in the spec-14 band, with the family it may ask
+ * about. Named here for the same reason `fit-below` is: the band is a scheduling
+ * reason, and a reason belongs in the refusal vocabulary even while v1 surfaces
+ * it instead of refusing (spec-14: band nodes stay dispatchable, per spec-13).
+ */
+export type FitBandEntry = { id: string; candidates: string[] };
 
 export type Batch = {
 	/** Declaration order; deterministic for the same plan + filesystem. */
@@ -51,6 +59,13 @@ export type Batch = {
 	 * injected — no evidence, no verdict, never a silent pass.
 	 */
 	fit?: BatchFit;
+	/**
+	 * spec-14 judgment band: the batch members whose fit is `unknown` or sits
+	 * within ±BAND_WIDTH of the gate, each with its role-family candidates.
+	 * Absent when no catalog was injected or nothing is in band. A band node is
+	 * dispatched as usual — the band is surfaced, never a refusal.
+	 */
+	fitBand?: FitBandEntry[];
 };
 
 export type NextBatch =
@@ -218,6 +233,17 @@ export function nextBatch(plan: Plan, fs: FsProbe, options: PoolOptions = {}): N
 	for (const member of members) {
 		for (const write of member.writes) declared.add(resolvePlanPath(cwd, write));
 	}
+
+	// spec-14: the band is surfaced, never refused. A band member keeps its slot;
+	// the notify text names the candidates the conductor may ask about.
+	const bandIds = new Set(members.map((member) => member.id));
+	const fitBand: FitBandEntry[] = (fit?.results ?? [])
+		.filter((result) => bandIds.has(result.id) && bandOf(result))
+		.map((result) => {
+			const member = members.find((candidate) => candidate.id === result.id);
+			return { id: result.id, candidates: familyCandidates(member?.role ?? "", options.catalog) };
+		});
+	const fitState = { ...(fit !== undefined ? { fit } : {}), ...(fitBand.length > 0 ? { fitBand } : {}) };
 	const snapshot: PathSnapshot[] = [...declared]
 		.sort()
 		.map((path) => {
@@ -241,7 +267,7 @@ export function nextBatch(plan: Plan, fs: FsProbe, options: PoolOptions = {}): N
 				return {
 					kind: "batch",
 					done: state.done,
-					batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan, ...(fit !== undefined ? { fit } : {}) },
+					batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan, ...fitState },
 					refused: { reason: "repo-dirty", dirty: status.dirty },
 				};
 			}
@@ -251,7 +277,7 @@ export function nextBatch(plan: Plan, fs: FsProbe, options: PoolOptions = {}): N
 	return {
 		kind: "batch",
 		done: state.done,
-		batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan, ...(fit !== undefined ? { fit } : {}) },
+		batch: { ids: members.map((member) => member.id), deferred, widthCap: cap, snapshot, rootScan: scan, ...fitState },
 	};
 }
 

@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { normalizePath } from "../core/contract.ts";
-import { nextStep, writeCollisions } from "../core/dispatcher.ts";
+import { nextStep, writeCollisions, appendRunLog, runLogPath } from "../core/dispatcher.ts";
+import { buildRfitQuestions, mapVerdicts } from "../core/rfit.ts";
 import { lintPlan } from "../core/plan.ts";
 import {
 	attemptsPath,
@@ -370,6 +371,46 @@ test("nextBatch: no catalog injected means no fit filter and no fit summary (spe
 	assert.deepEqual(result.batch.ids, ["exact", "mismatch", "silent"], "absence of evidence is never a refusal");
 	assert.deepEqual(result.batch.deferred, []);
 	assert.equal(result.batch.fit, undefined);
+	assert.equal(result.batch.fitBand, undefined, "no catalog means no band to surface");
+});
+
+// ── spec-14: the judgment band is surfaced, never refused ──────────────────
+
+test("nextBatch: a band node stays dispatched and is listed with its family candidates (spec-14)", () => {
+	const p = plan([
+		{ id: "borderline", role: "coder", task: "do borderline", requires: [], reads: [], writes: ["C:/proj/borderline.md"], dependsOn: [], width: 4, needs: ["typescript", "rust"] },
+		{ id: "settled", role: "coder", task: "do settled", requires: [], reads: [], writes: ["C:/proj/settled.md"], dependsOn: [], width: 4, needs: ["typescript"] },
+	]);
+	const catalog = [
+		{ role: "coder", holds: ["typescript"] },
+		{ role: "coder-typescript", holds: ["typescript", "rust"] },
+	];
+	const result = nextBatch(p, allAbsent, { catalog });
+	assert.equal(result.kind, "batch");
+	if (result.kind !== "batch") return;
+	// Neither node is refused: coverage 0.5 and 1.0 are both at or above the gate.
+	assert.deepEqual(result.batch.ids, ["borderline", "settled"]);
+	assert.deepEqual(result.batch.deferred, []);
+	assert.deepEqual(result.batch.fitBand, [{ id: "borderline", candidates: ["coder", "coder-typescript"] }]);
+});
+
+test("nextBatch: an unknown fit surfaces the band with candidates, not a refusal (spec-14)", () => {
+	const result = nextBatch(fitPlan(), allAbsent, { catalog: FIT_CATALOG });
+	assert.equal(result.kind, "batch");
+	if (result.kind !== "batch") return;
+	assert.deepEqual(result.batch.fitBand, [{ id: "silent", candidates: ["reviewer"] }], "no needs is unknown, so it is in band");
+	assert.deepEqual(result.batch.deferred, [{ id: "mismatch", why: "fit-below" }], "fit-below deferral is unchanged");
+});
+
+test("nextBatch: a role with no family in the catalog keeps its band row with no candidates (spec-14)", () => {
+	const p = plan([
+		{ id: "ghost", role: "ghost", task: "do ghost", requires: [], reads: [], writes: ["C:/proj/ghost.md"], dependsOn: [], width: 4, needs: ["typescript"] },
+	]);
+	const result = nextBatch(p, allAbsent, { catalog: FIT_CATALOG });
+	assert.equal(result.kind, "batch");
+	if (result.kind !== "batch") return;
+	assert.deepEqual(result.batch.ids, ["ghost"], "an unknown role is dispatchable, never below");
+	assert.deepEqual(result.batch.fitBand, [{ id: "ghost", candidates: [] }]);
 });
 
 test("nextBatch: fit filtering never reaches the write-verification path (spec-13 / PS-TV-04)", () => {
@@ -380,4 +421,37 @@ test("nextBatch: fit filtering never reaches the write-verification path (spec-1
 	const verdict = verifyBatch({ ids: ["exact"] }, scanRoot("C:/proj"), scanRoot("C:/proj"), p);
 	assert.deepEqual(verdict.accepted.concat(verdict.missing, verdict.unchanged).includes("mismatch"), false);
 	assert.equal(fs.exists("C:/proj/exact.md"), true);
+});
+
+// ── spec-14 / RTL-09: the band answer leaves a trace ──────────────────────
+
+test("fit-judgment run-log record keeps the batch id, the questions and the verdicts (spec-14)", () => {
+	const catalog = [{ role: "coder", holds: ["typescript"] }, { role: "coder-typescript", holds: ["typescript", "tests"] }];
+	const questions = buildRfitQuestions(
+		[{ id: "loader", role: "coder", needs: ["typescript", "tests"], task: "add the typed loader" }],
+		catalog
+	);
+	const verdicts = {
+		"rfit:loader:coder": { value: "no", confidence: 0.9 },
+		"rfit:loader:coder-typescript": { value: "yes", confidence: 0.4 },
+	};
+	const mapping = mapVerdicts(questions, verdicts);
+	const path = runLogPath(join(dir, "band"), "band", "2026-11-02T10:00:00.000Z");
+	appendRunLog(path, {
+		kind: "fit-judgment",
+		plan: "band",
+		batch: "abc123456789",
+		questions: Object.keys(questions),
+		verdicts,
+		moves: mapping.moves,
+		unresolved: mapping.unresolved,
+		at: "2026-11-02T10:00:00.000Z",
+	});
+	const text = readFileSync(path, "utf-8");
+	assert.match(text, /fit-judgment/);
+	assert.match(text, /"batch":"abc123456789"/);
+	const record = JSON.parse(text.trim());
+	assert.deepEqual(record.moves, [{ id: "loader", agent: "coder", fit: "below" }]);
+	assert.deepEqual(record.unresolved, ["rfit:loader:coder-typescript"]);
+	assert.deepEqual(record.questions, ["rfit:loader:coder", "rfit:loader:coder-typescript"]);
 });

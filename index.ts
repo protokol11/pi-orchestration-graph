@@ -4,6 +4,7 @@
 // commands are parent-facing ops and diagnostics; wave 4 calls the exported
 // functions from the dispatcher.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { readMarker } from "./core/contract.ts";
@@ -20,7 +21,7 @@ import {
 	sizeProbe,
 } from "./core/dispatcher.ts";
 import { resolvePlanPath } from "./core/contract.ts";
-import { defaultMapPath, ensureOgDirs, lintPlan, ogDirs, type Plan } from "./core/plan.ts";
+import { defaultMapPath, dispatchable, ensureOgDirs, lintPlan, ogDirs, type Plan } from "./core/plan.ts";
 import {
 	applyPatch,
 	classifyPatch,
@@ -41,6 +42,7 @@ import {
 	type Refusal,
 } from "./core/pool.ts";
 import { scanRoot, type RootScan } from "./core/root.ts";
+import { buildRfitQuestions, mapVerdicts, type CatalogEntry, type RfitVerdict } from "./core/rfit.ts";
 import { rewindSessionFile, type RewindSession } from "./core/rewind.ts";
 import { candidatesFromBranch } from "./core/candidates.ts";
 import { markerValidity } from "./core/validity.ts";
@@ -61,6 +63,7 @@ export {
 } from "./core/dispatcher.ts";
 
 export { nextBatch, verifyBatch } from "./core/pool.ts";
+export { bandOf, buildRfitQuestions, familyOf, mapVerdicts } from "./core/rfit.ts";
 export { checkRepoClean, classifyPatch, applyPatch, findRepoRoot } from "./core/isolation.ts";
 
 type SerializedScan = {
@@ -105,6 +108,76 @@ function readBatchState(path: string): { batch: BatchStateFile["batch"]; scan: R
 		return { batch: parsed.batch, scan: deserializeScan(parsed.scan) };
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * spec-14 catalog injection. The catalog is injected, never discovered by the
+ * pure modules: this reader is the seam, and it accepts the two shapes a
+ * producer writes — `[{ role, holds }]` and `{ role: holds[] }`.
+ */
+function readCatalog(path: string): CatalogEntry[] | undefined {
+	const holdsOf = (value: unknown): string[] => {
+		if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+		const nested = value && typeof value === "object" ? (value as { holds?: unknown }).holds : undefined;
+		return Array.isArray(nested) ? nested.filter((item): item is string => typeof item === "string") : [];
+	};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+		if (Array.isArray(parsed)) {
+			return parsed
+				.filter((entry): entry is { role: string } => Boolean(entry) && typeof entry === "object" && typeof (entry as { role?: unknown }).role === "string")
+				.map((entry) => ({ role: entry.role, holds: holdsOf(entry) }));
+		}
+		if (parsed && typeof parsed === "object") {
+			return Object.entries(parsed as Record<string, unknown>).map(([role, value]) => ({ role, holds: holdsOf(value) }));
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** `/og-band <plan> [--catalog <file>] [--verdicts <json>]`; verdicts take the rest of the line. */
+function splitBandArgs(raw: string): { plan: string; catalog?: string; verdicts?: string } {
+	const at = raw.indexOf("--verdicts");
+	const head = at === -1 ? raw : raw.slice(0, at);
+	const tail = at === -1 ? "" : raw.slice(at + "--verdicts".length).trim();
+	// Verdicts take the rest of the line. A quoted value ends at its closing quote,
+	// so `/og-band p.md --verdicts '{"k": ...}'` works as typed.
+	const quoted = /^(['"])([\s\S]*?)\1/.exec(tail);
+	const tokens = head.trim().split(/\s+/).filter(Boolean);
+	const rest: string[] = [];
+	let catalog: string | undefined;
+	for (let i = 0; i < tokens.length; i++) {
+		if (tokens[i] === "--catalog") {
+			catalog = tokens[++i];
+			continue;
+		}
+		rest.push(tokens[i]);
+	}
+	return {
+		plan: rest.join(" "),
+		...(catalog !== undefined ? { catalog } : {}),
+		...(tail !== "" ? { verdicts: quoted ? quoted[2] : tail } : {}),
+	};
+}
+
+/** `--verdicts` takes inline JSON or a path; the mapping stays in `core/rfit.ts`. */
+function readVerdicts(value: string): Record<string, RfitVerdict> | undefined {
+	const text = value.trim();
+	const raw = text.startsWith("{") ? text : (() => {
+		try {
+			return readFileSync(text, "utf-8");
+		} catch {
+			return "";
+		}
+	})();
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, RfitVerdict>) : undefined;
+	} catch {
+		return undefined;
 	}
 }
 
@@ -455,9 +528,98 @@ export default function orchestrationGraph(pi: ExtensionAPI): void {
 					`root scan ${scan.count}f / ${scan.bytes}B${scan.truncated ? " TRUNCATED → strayCheck skipped" : ""}`,
 					// spec-13: the fit buckets are the audit trail for this dispatch decision.
 					...(batch.fit !== undefined ? [batch.fit.summary] : []),
+					// spec-14: band nodes stay dispatchable; the band is named, never guessed.
+					...(batch.fitBand ?? []).map(
+						(row) => `fit-band: ${row.id} -> candidates ${row.candidates.join(", ")} (run: og-band ${basename(planPath)})`
+					),
 					renderRunsAll(plan, batch),
 				].join("\n"),
 				"info"
+			);
+		},
+	});
+
+	pi.registerCommand("og-band", {
+		description: "Print the spec-14 rfit judgment batch for a plan; --verdicts maps the judge answers to buckets",
+		handler: async (args, ctx) => {
+			const options = splitBandArgs((args ?? "").trim());
+			if (!options.plan) {
+				ctx.ui.notify("og: usage /og-band <plan.md> --catalog <catalog.json> [--verdicts <json|file>]", "warning");
+				return;
+			}
+			if (options.catalog === undefined) {
+				ctx.ui.notify("og: no catalog injected — pass --catalog <catalog.json>. Nothing asked; the band never guesses.", "warning");
+				return;
+			}
+			const catalog = readCatalog(options.catalog);
+			if (catalog === undefined) {
+				ctx.ui.notify(`og: cannot read catalog ${options.catalog}`, "error");
+				return;
+			}
+
+			let text: string;
+			try {
+				text = readFileSync(options.plan, "utf-8");
+			} catch (error) {
+				ctx.ui.notify(`og: cannot read plan: ${error instanceof Error ? error.message : String(error)}`, "error");
+				return;
+			}
+			const linted = lintPlan(text, { cwd: ctx.cwd, catalog });
+			if (!linted.ok) {
+				ctx.ui.notify(
+					`og: plan refused — ${linted.errors.map((e) => `${e.code}${e.node ? `(${e.node})` : ""}`).join(", ")}`,
+					"error"
+				);
+				return;
+			}
+
+			const plan = linted.plan;
+			const slug = basename(options.plan, ".md");
+			const state = deriveDone(plan, fsProbe(ctx.cwd));
+			const questions = buildRfitQuestions(dispatchable(plan, state.done), catalog);
+			const keys = Object.keys(questions);
+			if (keys.length === 0) {
+				ctx.ui.notify("og: no band nodes — every dispatchable node's fit is settled", "info");
+				return;
+			}
+
+			const nodes = new Set(Object.values(questions).map((question) => question.node));
+			// The conductor copies this JSON into the judge tool; the model call is
+			// outside this process, so the shipped lint gates it before money is spent.
+			ctx.ui.notify(
+				`og: band batch ${keys.length} question(s) for ${nodes.size} node(s)\n${JSON.stringify(questions, null, 2)}`,
+				"info"
+			);
+
+			if (options.verdicts === undefined) {
+				ctx.ui.notify("og: copy the batch into the judge tool, then rerun with --verdicts <json|file>", "info");
+				return;
+			}
+			const verdicts = readVerdicts(options.verdicts);
+			if (verdicts === undefined) {
+				ctx.ui.notify("og: cannot read verdicts — expected a JSON object keyed by cp_key", "error");
+				return;
+			}
+
+			const mapping = mapVerdicts(questions, verdicts);
+			const batchId = createHash("sha256").update(JSON.stringify(keys)).digest("hex").slice(0, 12);
+			ensureOgDirs(ctx.cwd);
+			appendRunLog(runLogPath(ctx.cwd, slug), {
+				kind: "fit-judgment",
+				plan: slug,
+				batch: batchId,
+				questions: keys,
+				verdicts,
+				moves: mapping.moves,
+				unresolved: mapping.unresolved,
+				at: new Date().toISOString(),
+			});
+
+			const moves = mapping.moves.map((move) => `${move.id} -> ${move.agent} ${move.fit}`);
+			const unresolved = mapping.unresolved.length > 0 ? [`unresolved ${mapping.unresolved.length} (${mapping.unresolved.join(", ")})`] : [];
+			ctx.ui.notify(
+				[`og: band ${batchId}`, ...moves, ...unresolved].join("\n"),
+				unresolved.length > 0 ? "warning" : "info"
 			);
 		},
 	});

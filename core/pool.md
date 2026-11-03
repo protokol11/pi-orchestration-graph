@@ -47,6 +47,24 @@ fit: ok 2 (a, b) | below deferred 1 (c) | unknown 1 (d)
 Fit is a scheduling filter, not verification: `needs` never appears in
 `deriveDone`, `verifyBatch`, or the settle path (`core/rfit.md`).
 
+## Judgment band (spec-14)
+
+A batch member whose fit is `unknown` or borderline (`bandOf`) keeps its slot.
+Nothing is refused. The batch carries the band instead:
+
+```
+fitBand: [{ id: "silent", candidates: ["reviewer", "reviewer-security"] }]
+```
+
+- Band candidates are the node's role family, in catalog order.
+- A band node with no family match keeps its row with `candidates: []`.
+- The reason vocabulary also declares `fit-band`, so a future refusal can name
+  the band without inventing a word. v1 never refuses on it.
+- Absent catalog or empty band → `fitBand` stays absent.
+
+`/og-dispatch` prints one line per band row and points at `/og-band`. The band
+protocol lives in `core/rfit.md`.
+
 ## Isolation is checked, not created
 
 - One `scanRoot(plan.writeRoot)` before, one after (`<slug>.batch.json` holds the after-scan's
