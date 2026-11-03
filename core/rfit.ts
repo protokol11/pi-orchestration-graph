@@ -7,6 +7,9 @@
 //   coverage  = |holds ∩ needs| / |needs|   how much of the need is held
 //   precision = |holds ∩ needs| / |holds|   how much of the load is used
 //
+// Gating uses MIN_COVERAGE, the rank.ts rule (2026-11-02): a node fits when its
+// needs are covered. `score` is reported for ordering and audit, never gating.
+//
 // `needs` (capability tags) is deliberately not `requires` (preload *file
 // paths*, spec-7): overloading one field would make invalid states representable
 // (CP-22). Plans never carry `holds` — the catalog owns that (K1 decision 2).
@@ -17,6 +20,15 @@
 // `unknown` is a first-class answer, not an error: an agent with no declared
 // `holds`, or a task with no declared `needs`, is dispatchable but unproven —
 // surfaced in the batch summary, never laundered into `ok`.
+//
+// Gating line: coverage >= MIN_COVERAGE decides ok vs below (rank.ts precedent).
+// MIN_FIT stays the score constant and is reported only — score orders results.
+export const MIN_COVERAGE = 0.5;
+/**
+ * Score threshold, reported for ordering/audit only — NEVER gate on this;
+ * the gate is MIN_COVERAGE (Decision addendum 2026-11-02: gating on the
+ * coverage × precision product rejects fitting versatile agents).
+ */
 export const MIN_FIT = 0.5;
 
 export type Fit = "ok" | "unknown" | "below";
@@ -40,7 +52,7 @@ export type NodeFit = { id: string } & FitResult;
 export type BatchFit = {
 	/** Node ids that proved fit. Dispatchable. */
 	ok: string[];
-	/** Node ids below MIN_FIT. Deferred with reason `fit-below`. */
+	/** Node ids below MIN_COVERAGE. Deferred with reason `fit-below`. */
 	below: string[];
 	/** Node ids with nothing declared on one side. Dispatchable, unproven. */
 	unknown: string[];
@@ -68,7 +80,8 @@ function bucketLine(label: string, ids: string[]): string {
 /**
  * Fit one plan node against one catalog entry. Either side declaring nothing is
  * `unknown` — score 0, no missing list (nothing was claimed, so nothing is
- * lacking). Otherwise the rank.ts formula decides, and MIN_FIT is the line.
+ * lacking). Otherwise the rank.ts formula is computed, and MIN_COVERAGE is the
+ * line: coverage alone gates, score (coverage × precision) is reported.
  */
 export function fitNode(node: { role: string; needs?: string[] }, entry?: CatalogEntry): FitResult {
 	const needs = tags(node?.needs);
@@ -83,7 +96,7 @@ export function fitNode(node: { role: string; needs?: string[] }, entry?: Catalo
 	const precision = hit.length / holds.length;
 	const score = coverage * precision;
 	return {
-		fit: score >= MIN_FIT ? "ok" : "below",
+		fit: coverage >= MIN_COVERAGE ? "ok" : "below",
 		coverage,
 		precision,
 		score,

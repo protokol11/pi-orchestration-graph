@@ -25,15 +25,15 @@ precision = |holds ∩ needs| / |holds|    how much of the load is used
 score     = coverage × precision
 ```
 
-Their product rejects the role that holds everything; coverage alone saturates
-and precision alone ignores the requirement.
+Their product ranks a candidate well. It does not decide fit. Coverage
+>= `MIN_COVERAGE` decides fit (2026-11-02), score orders the result.
 
 ## Three outcomes — `unknown` is an answer, not an error
 
 | result | when | dispatch |
 |---|---|---|
-| `ok` | `score >= MIN_FIT` | dispatched |
-| `below` | `score < MIN_FIT`, both sides declared | deferred, reason `fit-below` |
+| `ok` | `coverage >= MIN_COVERAGE` | dispatched |
+| `below` | `coverage < MIN_COVERAGE`, both sides declared | deferred, reason `fit-below` |
 | `unknown` | `needs` empty/absent, or `holds` empty/absent, or role absent from the catalog | dispatched, listed as unproven |
 
 `unknown` is never coerced to `ok`. An undeclared agent and an undeclared task
@@ -43,10 +43,41 @@ by surprise.
 
 ## Threshold
 
-`MIN_FIT = 0.5`, the `MIN_COVERAGE` precedent from `rank.ts`. The constant is
-the default, not the law: the batch summary prints the actual coverage /
-precision numbers, so the owner moves it from evidence (HUMAN-JUDGMENT-FINAL
-stays with the human). Boundary is inclusive — `score === 0.5` is `ok`.
+Two constants, one gate:
+
+| constant | value | role |
+|---|---|---|
+| `MIN_COVERAGE` | 0.5 | gating line, the `rank.ts` precedent |
+| `MIN_FIT` | 0.5 | score constant, reported and not gating |
+
+`MIN_FIT` stays exported and `score` stays computed. Both feed ordering and the
+run-log audit trail. Coverage alone decides `ok` vs `below`. The constant is the
+default, not the law: the batch summary prints the actual coverage and precision
+numbers, so the owner moves it from evidence (HUMAN-JUDGMENT-FINAL stays with the
+human). Boundary is inclusive: `coverage === 0.5` is `ok`.
+
+## Decision addendum (2026-11-02)
+
+Gate is `coverage >= MIN_COVERAGE` at 0.5, the `rank.ts` precedent. The score
+(`coverage × precision`) is reported, not gating.
+
+Rationale: precision punishes versatile agents on narrow tasks. Measured on the
+real catalog, `coder` holds four tags. A task that needs `[code]` gives coverage
+1 and precision 1/4, so score is 0.25. The old rule called that `below` even
+though `missing` was empty. Nothing was lacking, so nothing justified a refusal.
+
+Evidence rows after the change:
+
+| role | needs | coverage | score | fit |
+|---|---|---|---|---|
+| coder | `[code]` | 1 | 0.25 | ok |
+| coder | `[rust]` | 0 | 0 | below |
+| tester | `[tests]` | 1 | 1/3 | ok |
+| explore | `[research]` | 1 | 1/3 | ok |
+| coder | `[code, rust]` | 0.5 | 0.125 | ok, missing `[rust]` |
+
+The last row is the trade the owner accepted. Partial coverage passes the gate
+and the shortfall stays visible in `missing`.
 
 ## `needs` vs `requires` (CP-22)
 
@@ -93,9 +124,9 @@ fitBatch(nodes, entries)    -> { ok, below, unknown, results, summary }
 
 ## Review notes
 
-1. The float boundary uses the same `score >= MIN_FIT` double expression as
-   `rank.ts`. Exact-half rationals can land one ulp below 0.5. This matches the
-   established precedent. Revisit only if a consumer needs exactness.
+1. The float boundary uses the same `coverage >= MIN_COVERAGE` double expression
+   as `rank.ts`. Exact-half rationals (`2/4`) land on 0.5 exactly. Revisit only
+   if a consumer needs exactness.
 2. `fitBatch` skips nodes without a string id. Lint enforces `id`, so this is
    unreachable after lint. It stays as a pure-function guard.
 3. In the unknown branch `missing` is deliberately `[]`. Nothing was claimed, so

@@ -315,6 +315,9 @@ const fitPlan = () =>
 		{ id: "mismatch", role: "coder", task: "do mismatch", requires: [], reads: [], writes: ["C:/proj/mismatch.md"], dependsOn: [], width: 4, needs: ["screenshots", "art"] },
 		{ id: "silent", role: "reviewer", task: "do silent", requires: [], reads: [], writes: ["C:/proj/silent.md"], dependsOn: [], width: 4 },
 	]);
+// Gating is coverage >= MIN_COVERAGE (owner decision 2026-11-02). `mismatch`
+// needs tags coder does not hold, so coverage is 0 — firmly below under either
+// rule. `exact` is coverage 1. `silent` declares no needs, so it stays unknown.
 const FIT_CATALOG = [
 	{ role: "coder", holds: ["typescript", "tests"] },
 	{ role: "reviewer", holds: ["review"] },
@@ -343,6 +346,8 @@ test("nextBatch: the batch summary names the three fit buckets (spec-13)", () =>
 });
 
 test("nextBatch: fit-below and a pre-existing refusal share the same deferred array (spec-13)", () => {
+	// fitlow keeps its below verdict under coverage gating: needs [screenshots,
+	// art] against coder holds [typescript, tests] gives coverage 0, under 0.5.
 	const p = plan([
 		{ id: "fitlow", role: "coder", task: "do fitlow", requires: [], reads: [], writes: ["C:/proj/fitlow.md"], dependsOn: [], width: 4, needs: ["screenshots", "art"] },
 		{ id: "first", role: "coder", task: "do first", requires: [], reads: [], writes: ["C:/proj/shared.md"], dependsOn: [], width: 4 },
